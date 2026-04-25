@@ -1,0 +1,20 @@
+name = "peakai-mcp"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Bind a KV namespace for OAuth session storage.
+# Create with: wrangler kv:namespace create SESSIONS
+# Then paste the returned id below.
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "REPLACE_ME_AFTER_wrangler_kv_namespace_create_SESSIONS"
+preview_id = "REPLACE_ME_FOR_LOCAL_DEV"
+
+[vars]
+PEAKAI_API_BASE = "https://automation.sayf.in"
+STUDIO_BASE = "https://studio.thepeakai.com"
+
+# Secrets (set with `wrangler secret put NAME`):
+#   OAUTH_SIGNING_KEY  — random 32+ byte string for signing OAuth codes/tokens
+#   DEV_JWT            — (dev only) hardcoded Nhost JWT for local testing

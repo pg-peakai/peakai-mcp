@@ -1,0 +1,4 @@
+# Copy to .dev.vars (gitignored) for local `wrangler dev`.
+# DEV_JWT lets you skip OAuth and call /mcp with no Authorization header during testing.
+DEV_JWT=paste_your_nhost_jwt_here
+OAUTH_SIGNING_KEY=any_random_string_for_local
