@@ -41,6 +41,32 @@ export async function callExtractor(
   return (await res.json()) as ExtractorResult;
 }
 
+export async function getCredits(apiBase: string, jwt: string): Promise<unknown> {
+  const url = new URL(`${apiBase}/webhook/get_credits`);
+  url.searchParams.set("access_token", jwt);
+  const res = await fetch(url.toString(), {
+    method: "GET",
+    headers: { Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
+  });
+  if (!res.ok) throw new Error(`get_credits failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
+  const data = (await res.json()) as Record<string, unknown>;
+  // Return only the credit-relevant subset, not the full user blob.
+  return {
+    type: data.type,
+    credits: data.credits,
+    organisation_credits: data.organisation_credits,
+    organisation_name: data.organisation_name,
+    effective_credits:
+      data.type === "organisation" &&
+      data.organisation_id &&
+      data.organisation_id !== "null" &&
+      typeof data.organisation_credits === "number" &&
+      (data.organisation_credits as number) > 0
+        ? data.organisation_credits
+        : data.credits,
+  };
+}
+
 export async function exchangePassword(
   apiBase: string,
   id: string,

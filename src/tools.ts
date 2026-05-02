@@ -1,11 +1,11 @@
 import { z } from "zod";
-import { callExtractor, type ExtractorType } from "./peakai";
+import { callExtractor, getCredits, type ExtractorType } from "./peakai";
 
 export interface ToolDef {
   name: string;
   description: string;
   inputSchema: { type: "object"; properties: Record<string, unknown>; required: string[] };
-  run: (args: { profile_url: string }, ctx: { jwt: string; apiBase: string }) => Promise<unknown>;
+  run: (args: Record<string, unknown>, ctx: { jwt: string; apiBase: string }) => Promise<unknown>;
 }
 
 const linkedinUrl = z.string().url().describe("Full LinkedIn profile URL, e.g. https://www.linkedin.com/in/johndoe");
@@ -28,7 +28,8 @@ function makeExtractorTool(
       },
       required: ["profile_url"],
     },
-    async run({ profile_url }, { jwt, apiBase }) {
+    async run(args, { jwt, apiBase }) {
+      const profile_url = String(args.profile_url ?? "");
       linkedinUrl.parse(profile_url);
       return await callExtractor(apiBase, jwt, type, profile_url);
     },
@@ -71,6 +72,15 @@ export const TOOLS: ToolDef[] = [
     "DIN-based email lookup (India directors) for a LinkedIn profile.",
     "din_email",
   ),
+  {
+    name: "check_credits",
+    description:
+      "Check the current PeakAI credit balance for the authenticated user. Returns individual credits, organisation credits (if applicable), and the effective balance used for lookups.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+    async run(_args, { jwt, apiBase }) {
+      return await getCredits(apiBase, jwt);
+    },
+  },
 ];
 
 export const TOOLS_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));

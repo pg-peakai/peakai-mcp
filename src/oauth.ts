@@ -28,6 +28,23 @@ function rand(n = 32): string {
 
 export const oauth = new Hono<Env>();
 
+// CORS for browser-initiated OAuth requests (e.g. studio.thepeakai.com → /mcp/callback).
+oauth.use("*", async (c, next) => {
+  if (c.req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "authorization, content-type",
+        "Access-Control-Max-Age": "86400",
+      },
+    });
+  }
+  await next();
+  c.res.headers.set("Access-Control-Allow-Origin", "*");
+});
+
 // ---- Discovery (Claude reads these to learn the OAuth endpoints) ----
 oauth.get("/.well-known/oauth-authorization-server", (c) => {
   const base = new URL(c.req.url).origin;
