@@ -6,6 +6,7 @@ type Env = {
   Bindings: {
     PEAKAI_API_BASE: string;
     STUDIO_BASE: string;
+    NHOST_AUTH_BASE: string;
     OAUTH_SIGNING_KEY: string;
     SESSIONS: KVNamespace;
     DEV_JWT?: string;
@@ -19,16 +20,38 @@ app.get("/healthz", (c) => c.json({ ok: true }));
 
 app.route("/", oauth);
 
-// CORS for MCP — claude.ai calls this from the browser.
+const ALLOWED_ORIGINS = new Set([
+  "https://claude.ai",
+  "https://claude.com",
+  "https://studio.thepeakai.com",
+]);
+
+function pickOrigin(req: Request): string | null {
+  const o = req.headers.get("origin");
+  if (!o) return null;
+  if (ALLOWED_ORIGINS.has(o)) return o;
+  try {
+    const u = new URL(o);
+    if (u.hostname.endsWith(".anthropic.com") || u.hostname.endsWith(".claude.ai")) return o;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 app.options("/mcp", (c) => {
+  const origin = pickOrigin(c.req.raw);
   return new Response(null, {
     status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "authorization, content-type, mcp-session-id, mcp-protocol-version",
-      "Access-Control-Max-Age": "86400",
-    },
+    headers: origin
+      ? {
+          "Access-Control-Allow-Origin": origin,
+          "Vary": "Origin",
+          "Access-Control-Allow-Methods": "POST, OPTIONS",
+          "Access-Control-Allow-Headers": "authorization, content-type, mcp-session-id, mcp-protocol-version",
+          "Access-Control-Max-Age": "86400",
+        }
+      : {},
   });
 });
 
@@ -53,7 +76,7 @@ app.post("/mcp", async (c) => {
       headers: {
         "WWW-Authenticate": `Bearer realm="peakai-mcp", resource_metadata="${new URL(c.req.url).origin}/.well-known/oauth-protected-resource"`,
         "content-type": "application/json",
-        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Origin": pickOrigin(c.req.raw) ?? "",
       },
     });
   }
@@ -61,16 +84,17 @@ app.post("/mcp", async (c) => {
   const body = await c.req.json();
   const result = await handleMcp(body, { jwt, apiBase: c.env.PEAKAI_API_BASE });
 
+  const corsOrigin = pickOrigin(c.req.raw);
   if (result === null) {
     return new Response(null, {
       status: 202,
-      headers: { "Access-Control-Allow-Origin": "*" },
+      headers: corsOrigin ? { "Access-Control-Allow-Origin": corsOrigin, Vary: "Origin" } : {},
     });
   }
   return new Response(JSON.stringify(result), {
     headers: {
       "content-type": "application/json",
-      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Origin": pickOrigin(c.req.raw) ?? "",
     },
   });
 });

@@ -17,6 +17,28 @@ type Env = {
   };
 };
 
+// Origins allowed to read OAuth/MCP responses from a browser.
+// Anything not in this set gets the default same-origin browser behaviour.
+const ALLOWED_ORIGINS = [
+  "https://claude.ai",
+  "https://claude.com",
+  "https://studio.thepeakai.com",
+];
+
+function pickAllowedOrigin(reqOrigin: string | undefined): string | null {
+  if (!reqOrigin) return null;
+  if (ALLOWED_ORIGINS.includes(reqOrigin)) return reqOrigin;
+  // Anthropic console / preview subdomains.
+  try {
+    const u = new URL(reqOrigin);
+    if (u.hostname.endsWith(".anthropic.com")) return reqOrigin;
+    if (u.hostname.endsWith(".claude.ai")) return reqOrigin;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 const TEN_MIN = 600;
 const FOURTEEN_DAYS = 60 * 60 * 24 * 14;
 
@@ -29,20 +51,29 @@ function rand(n = 32): string {
 export const oauth = new Hono<Env>();
 
 // CORS for browser-initiated OAuth requests (e.g. studio.thepeakai.com → /mcp/callback).
+// Only echo Allow-Origin for known origins; same-origin server-to-server calls
+// don't need it.
 oauth.use("*", async (c, next) => {
+  const origin = pickAllowedOrigin(c.req.header("origin") ?? undefined);
   if (c.req.method === "OPTIONS") {
     return new Response(null, {
       status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "authorization, content-type",
-        "Access-Control-Max-Age": "86400",
-      },
+      headers: origin
+        ? {
+            "Access-Control-Allow-Origin": origin,
+            "Vary": "Origin",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "authorization, content-type",
+            "Access-Control-Max-Age": "86400",
+          }
+        : {},
     });
   }
   await next();
-  c.res.headers.set("Access-Control-Allow-Origin", "*");
+  if (origin) {
+    c.res.headers.set("Access-Control-Allow-Origin", origin);
+    c.res.headers.append("Vary", "Origin");
+  }
 });
 
 // ---- Discovery (Claude reads these to learn the OAuth endpoints) ----
@@ -129,6 +160,13 @@ oauth.get("/oauth/authorize", async (c) => {
 // ---- /mcp/callback — studio.thepeakai.com posts the JWT here after consent ----
 // POST body: { txn, access_token, refresh_token, user }
 oauth.post("/mcp/callback", async (c) => {
+  // Only accept POSTs originating from the studio domain — prevents a
+  // malicious site from racing to consume a valid txn or binding an
+  // attacker's JWT to a Claude session.
+  const origin = c.req.header("origin") ?? "";
+  if (origin !== c.env.STUDIO_BASE) {
+    return c.json({ error: "forbidden_origin" }, 403);
+  }
   const body = (await c.req.json().catch(() => null)) as {
     txn?: string;
     access_token?: string;
@@ -238,8 +276,17 @@ function base64url(bytes: Uint8Array): string {
   return btoa(s).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
 
+import { jwtExp, refreshNhost } from "./peakai";
+
+interface SessionBlob {
+  nhost_jwt: string;
+  nhost_refresh: string | null;
+  user: unknown;
+  client_id: string;
+}
+
 export async function resolveJwtFromBearer(
-  env: Env["Bindings"],
+  env: Env["Bindings"] & { NHOST_AUTH_BASE?: string },
   bearer: string,
 ): Promise<string | null> {
   if (!bearer) return null;
@@ -249,7 +296,30 @@ export async function resolveJwtFromBearer(
   try {
     const raw = await env.SESSIONS.get(`access:${bearer}`);
     if (!raw) return null;
-    const session = JSON.parse(raw) as { nhost_jwt: string };
+    const session = JSON.parse(raw) as SessionBlob;
+
+    // If the stored Nhost JWT is within 60s of expiry (or already expired),
+    // refresh it transparently using the stored refresh token.
+    const exp = jwtExp(session.nhost_jwt);
+    const now = Math.floor(Date.now() / 1000);
+    const nhostBase = env.NHOST_AUTH_BASE;
+    if (
+      exp !== null &&
+      exp - now < 60 &&
+      session.nhost_refresh &&
+      nhostBase
+    ) {
+      const refreshed = await refreshNhost(nhostBase, session.nhost_refresh);
+      if (refreshed) {
+        session.nhost_jwt = refreshed.accessToken;
+        session.nhost_refresh = refreshed.refreshToken;
+        // 14 days TTL preserved.
+        await env.SESSIONS.put(`access:${bearer}`, JSON.stringify(session), {
+          expirationTtl: 60 * 60 * 24 * 14,
+        });
+      }
+    }
+
     return session.nhost_jwt;
   } catch {
     return null;
