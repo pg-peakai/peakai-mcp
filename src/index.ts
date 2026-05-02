@@ -39,6 +39,21 @@ function pickOrigin(req: Request): string | null {
   return null;
 }
 
+app.get("/mcp", (c) => {
+  return c.json(
+    {
+      name: "peakai-mcp",
+      version: "0.1.0",
+      transport: "Streamable HTTP",
+      protocol: "MCP / JSON-RPC 2.0",
+      hint: "This endpoint expects POST requests with a JSON-RPC body. Add this URL as a custom connector in Claude (claude.ai → Settings → Connectors → Add custom connector).",
+      install_url: "https://mcp.thepeakai.com/mcp",
+      docs: "https://github.com/pg-peakai/peakai-mcp",
+    },
+    200,
+  );
+});
+
 app.options("/mcp", (c) => {
   const origin = pickOrigin(c.req.raw);
   return new Response(null, {
