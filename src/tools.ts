@@ -3,7 +3,11 @@ import { callExtractor, enrichByEmail, enrichByName, getCredits, type ExtractorT
 
 export interface ToolDef {
   name: string;
+  /** Human-readable display title (Anthropic Connectors Directory requirement). */
+  title: string;
   description: string;
+  /** True if the tool only reads data and never modifies state. */
+  readOnlyHint: boolean;
   inputSchema: { type: "object"; properties: Record<string, unknown>; required: string[] };
   run: (args: Record<string, unknown>, ctx: { jwt: string; apiBase: string }) => Promise<unknown>;
 }
@@ -12,12 +16,15 @@ const linkedinUrl = z.string().url().describe("Full LinkedIn profile URL, e.g. h
 
 function makeExtractorTool(
   name: string,
+  title: string,
   description: string,
   type: ExtractorType,
 ): ToolDef {
   return {
     name,
+    title,
     description,
+    readOnlyHint: true,
     inputSchema: {
       type: "object",
       properties: {
@@ -39,33 +46,40 @@ function makeExtractorTool(
 export const TOOLS: ToolDef[] = [
   makeExtractorTool(
     "find_personal_email",
+    "Find personal email",
     "Find the personal email address for a LinkedIn profile. Costs 1 credit.",
     "email",
   ),
   makeExtractorTool(
     "find_work_email",
+    "Find work email",
     "Find the work (corporate) email address for a LinkedIn profile.",
     "work_email",
   ),
   makeExtractorTool(
     "find_phone",
+    "Find phone number",
     "Find the phone number for a LinkedIn profile.",
     "phone_no",
   ),
   makeExtractorTool(
     "find_din_phone",
-    "DIN-based phone lookup (India directors) for a LinkedIn profile.",
+    "Find DIN-linked phone (India)",
+    "DIN-based phone lookup (Indian company directors) for a LinkedIn profile.",
     "din_phone",
   ),
   makeExtractorTool(
     "find_din_email",
-    "DIN-based email lookup (India directors) for a LinkedIn profile.",
+    "Find DIN-linked email (India)",
+    "DIN-based email lookup (Indian company directors) for a LinkedIn profile.",
     "din_email",
   ),
   {
     name: "enrich_by_email",
+    title: "Enrich by email",
     description:
       "Given an email address, return enriched profile data (name, company, role, LinkedIn, etc.) by reverse-looking up that email.",
+    readOnlyHint: true,
     inputSchema: {
       type: "object",
       properties: { email: { type: "string", description: "Email address to enrich" } },
@@ -79,8 +93,10 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "enrich_by_name",
+    title: "Enrich by name + company",
     description:
       "Given a person's name and company (and optionally their role), find and return their profile / contact data.",
+    readOnlyHint: true,
     inputSchema: {
       type: "object",
       properties: {
@@ -100,8 +116,10 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "check_credits",
+    title: "Check credit balance",
     description:
       "Check the current PeakAI credit balance for the authenticated user. Returns individual credits, organisation credits (if applicable), and the effective balance used for lookups.",
+    readOnlyHint: true,
     inputSchema: { type: "object", properties: {}, required: [] },
     async run(_args, { jwt, apiBase }) {
       return await getCredits(apiBase, jwt);

@@ -35,8 +35,10 @@ export async function handleMcp(
       return ok(id, {
         tools: TOOLS.map((t) => ({
           name: t.name,
+          title: t.title,
           description: t.description,
           inputSchema: t.inputSchema,
+          annotations: { readOnlyHint: t.readOnlyHint },
         })),
       });
 
