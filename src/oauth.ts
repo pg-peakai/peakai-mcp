@@ -226,8 +226,15 @@ export async function resolveJwtFromBearer(
   bearer: string,
 ): Promise<string | null> {
   if (!bearer) return null;
-  const raw = await env.SESSIONS.get(`access:${bearer}`);
-  if (!raw) return null;
-  const session = JSON.parse(raw) as { nhost_jwt: string };
-  return session.nhost_jwt;
+  // Only do a KV lookup if the bearer looks like one of our issued tokens.
+  // KV keys have a 512-byte limit, and a raw Nhost JWT is much larger.
+  if (!bearer.startsWith("mcp_")) return null;
+  try {
+    const raw = await env.SESSIONS.get(`access:${bearer}`);
+    if (!raw) return null;
+    const session = JSON.parse(raw) as { nhost_jwt: string };
+    return session.nhost_jwt;
+  } catch {
+    return null;
+  }
 }

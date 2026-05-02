@@ -8,8 +8,8 @@ compatibility_flags = ["nodejs_compat"]
 # Then paste the returned id below.
 [[kv_namespaces]]
 binding = "SESSIONS"
-id = "REPLACE_ME_AFTER_wrangler_kv_namespace_create_SESSIONS"
-preview_id = "REPLACE_ME_FOR_LOCAL_DEV"
+id = "43340ab514934ae1b33de9b1290cd98a"
+preview_id = "86efdad3cf734466a56fc008eca6763c"
 
 [vars]
 PEAKAI_API_BASE = "https://automation.sayf.in"
