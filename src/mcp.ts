@@ -44,7 +44,7 @@ export async function handleMcp(
 
     case "tools/call": {
       const name = params?.name as string;
-      const args = (params?.arguments ?? {}) as { profile_url: string };
+      const args = (params?.arguments ?? {}) as Record<string, unknown>;
       const tool = TOOLS_BY_NAME.get(name);
       if (!tool) return err(id, -32601, `Unknown tool: ${name}`);
       try {

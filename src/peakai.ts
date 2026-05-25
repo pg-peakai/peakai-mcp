@@ -12,19 +12,41 @@ export interface ExtractorResult {
   [key: string]: unknown;
 }
 
+/**
+ * Map a backend error (HTTP status + body) to a clean, user-facing message.
+ * Never leaks the raw backend body — that can expose the underlying data vendor.
+ */
+export function mapBackendError(status: number, body: string): string {
+  const b = body.toLowerCase();
+  if (status === 401 || b.includes("expired") || b.includes("invalid token") || b.includes("unauthor")) {
+    return "Invalid or expired access token";
+  }
+  if (status === 402 || b.includes("not enough credit") || b.includes("recharge") || b.includes("insufficient")) {
+    return "Not enough credits. Please recharge.";
+  }
+  if (status === 403 || b.includes("not enabled") || b.includes("api access")) {
+    return "API access is not enabled for your account. Email studio@thepeakai.com to enable it.";
+  }
+  return `PeakAI request failed (${status})`;
+}
+
 export async function callExtractor(
   apiBase: string,
   jwt: string,
   type: ExtractorType,
-  profileUrl: string,
+  params: Record<string, string>,
 ): Promise<ExtractorResult> {
-  // Use /webhook/extractor1 — the studio.thepeakai.com endpoint that accepts
-  // a regular Nhost JWT. /webhook/extractor (no suffix) is the public API and
-  // requires a separately-issued API key.
+  // Use /webhook/extractor1 — the endpoint that accepts a regular access token.
+  // /webhook/extractor (no suffix) is the public API and requires a
+  // separately-issued API key.
+  // `params` carries the type-specific input (profile_url, din, or value),
+  // matching the PeakAI REST API contract exactly.
   const url = new URL(`${apiBase}/webhook/extractor1`);
   url.searchParams.set("access_token", jwt);
   url.searchParams.set("type", type);
-  url.searchParams.set("profile_url", profileUrl);
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
 
   const res = await fetch(url.toString(), {
     method: "GET",
@@ -35,50 +57,9 @@ export async function callExtractor(
   });
 
   if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`PeakAI ${type} failed (${res.status}): ${body.slice(0, 300)}`);
+    throw new Error(mapBackendError(res.status, await res.text()));
   }
   return (await res.json()) as ExtractorResult;
-}
-
-export async function enrichByEmail(apiBase: string, jwt: string, email: string): Promise<unknown> {
-  const res = await fetch(`${apiBase}/webhook/enrichment`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ access_token: jwt, email }),
-  });
-  if (!res.ok) throw new Error(`enrichment failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
-  const text = await res.text();
-  if (!text) return { output: [] };
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { raw: text.slice(0, 500) };
-  }
-}
-
-export async function enrichByName(
-  apiBase: string,
-  jwt: string,
-  name: string,
-  company: string,
-  role?: string,
-): Promise<unknown> {
-  const body: Record<string, string> = { access_token: jwt, name, company };
-  if (role) body.role = role;
-  const res = await fetch(`${apiBase}/webhook/enrichment`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`enrichment failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
-  const text = await res.text();
-  if (!text) return { output: [] };
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { raw: text.slice(0, 500) };
-  }
 }
 
 export async function getCredits(apiBase: string, jwt: string): Promise<unknown> {
@@ -88,7 +69,7 @@ export async function getCredits(apiBase: string, jwt: string): Promise<unknown>
     method: "GET",
     headers: { Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
   });
-  if (!res.ok) throw new Error(`get_credits failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
+  if (!res.ok) throw new Error(mapBackendError(res.status, await res.text()));
   const data = (await res.json()) as Record<string, unknown>;
   // Return only the credit-relevant subset, not the full user blob.
   return {

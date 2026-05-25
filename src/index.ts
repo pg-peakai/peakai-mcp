@@ -47,7 +47,7 @@ app.get("/mcp", (c) => {
       transport: "Streamable HTTP",
       protocol: "MCP / JSON-RPC 2.0",
       hint: "This endpoint expects POST requests with a JSON-RPC body. Add this URL as a custom connector in Claude (claude.ai → Settings → Connectors → Add custom connector).",
-      install_url: "https://mcp.thepeakai.com/mcp",
+      install_url: "https://build.thepeakai.com/mcp",
       docs: "https://github.com/pg-peakai/peakai-mcp",
     },
     200,
