@@ -12,7 +12,10 @@ id = "43340ab514934ae1b33de9b1290cd98a"
 preview_id = "86efdad3cf734466a56fc008eca6763c"
 
 [vars]
-PEAKAI_API_BASE = "https://build.thepeakai.com"
+# NOTE: temporarily kept on automation.sayf.in — build.thepeakai.com does not
+# expose the lookup REST path (/webhook/extractor1 -> 404) yet. Flip to
+# https://build.thepeakai.com once that endpoint is live on the new backend.
+PEAKAI_API_BASE = "https://automation.sayf.in"
 STUDIO_BASE = "https://studio.thepeakai.com"
 NHOST_AUTH_BASE = "https://yobugvzhlfuxviaptquw.auth.ap-south-1.nhost.run"
 
