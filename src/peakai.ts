@@ -2,7 +2,7 @@ export type ExtractorType =
   | "email"
   | "work_email"
   | "phone_no"
-  | "profile_enrichment"
+  | "enrich"
   | "reverse_lookup"
   | "din_phone"
   | "din_email";
@@ -36,24 +36,17 @@ export async function callExtractor(
   type: ExtractorType,
   params: Record<string, string>,
 ): Promise<ExtractorResult> {
-  // Use /webhook/extractor1 — the endpoint that accepts a regular access token.
-  // /webhook/extractor (no suffix) is the public API and requires a
-  // separately-issued API key.
-  // `params` carries the type-specific input (profile_url, din, or value),
-  // matching the PeakAI REST API contract exactly.
-  const url = new URL(`${apiBase}/webhook/extractor1`);
-  url.searchParams.set("access_token", jwt);
-  url.searchParams.set("type", type);
-  for (const [key, value] of Object.entries(params)) {
-    url.searchParams.set(key, value);
-  }
-
-  const res = await fetch(url.toString(), {
-    method: "GET",
+  // POST /mcp on the new backend — the lookup endpoint that accepts a regular
+  // Nhost access token via the Authorization header. `params` carries the
+  // type-specific input (profile_url, din, or value), sent in the JSON body
+  // alongside the lookup `type`.
+  const res = await fetch(`${apiBase}/mcp`, {
+    method: "POST",
     headers: {
       Authorization: `Bearer ${jwt}`,
       "Content-Type": "application/json",
     },
+    body: JSON.stringify({ type, ...params }),
   });
 
   if (!res.ok) {
@@ -63,43 +56,132 @@ export async function callExtractor(
 }
 
 export async function getCredits(apiBase: string, jwt: string): Promise<unknown> {
-  const url = new URL(`${apiBase}/webhook/get_credits`);
-  url.searchParams.set("access_token", jwt);
-  const res = await fetch(url.toString(), {
+  const res = await fetch(`${apiBase}/api/balance`, {
     method: "GET",
     headers: { Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
   });
   if (!res.ok) throw new Error(mapBackendError(res.status, await res.text()));
   const data = (await res.json()) as Record<string, unknown>;
-  // Return only the credit-relevant subset, not the full user blob.
+  // /api/balance returns { credits, account_type } — `credits` already
+  // reflects organisation credits for org accounts, so no effective-credit
+  // reconciliation is needed anymore.
   return {
-    type: data.type,
     credits: data.credits,
-    organisation_credits: data.organisation_credits,
-    organisation_name: data.organisation_name,
-    effective_credits:
-      data.type === "organisation" &&
-      data.organisation_id &&
-      data.organisation_id !== "null" &&
-      typeof data.organisation_credits === "number" &&
-      (data.organisation_credits as number) > 0
-        ? data.organisation_credits
-        : data.credits,
+    account_type: data.account_type,
   };
+}
+
+/**
+ * POST a JSON body to a backend path with the user's JWT and return the parsed
+ * JSON response. Shared by the /mcp/* search + enrich endpoints below. Backend
+ * errors are mapped to clean messages via mapBackendError (never leaks the raw
+ * body / underlying data vendor).
+ */
+async function postJson(
+  apiBase: string,
+  path: string,
+  jwt: string,
+  body: unknown,
+): Promise<unknown> {
+  const res = await fetch(`${apiBase}${path}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(mapBackendError(res.status, await res.text()));
+  return await res.json();
+}
+
+export interface LeadSearchFilters {
+  search?: string;
+  jobTitles?: string[];
+  companies?: string[];
+  locations?: string[];
+  industries?: string[];
+  companyHeadcount?: string[];
+  maxPerCompany?: number;
+}
+
+export interface LeadSearchResult {
+  search_id: string;
+  total: number;
+  count: number;
+  view_url: string;
+  leads: Array<Record<string, unknown>>;
+}
+
+export interface CompanySearchFilters {
+  search?: string;
+  industries?: string[];
+  locations?: string[];
+  headcount?: string[];
+}
+
+export interface CompanySearchResult {
+  search_id: string;
+  total: number;
+  count: number;
+  view_url: string;
+  companies: Array<Record<string, unknown>>;
+}
+
+export interface LeadEnrichResult {
+  lead_id: string;
+  vanity_url?: string;
+  phone_no: string[];
+  email: string[];
+  work_email: string[];
+}
+
+/** POST /mcp/lead-search — FREE lead search. Returns a persisted search + leads. */
+export async function leadSearch(
+  apiBase: string,
+  jwt: string,
+  filters: LeadSearchFilters,
+  pages: number,
+): Promise<LeadSearchResult> {
+  return (await postJson(apiBase, "/mcp/lead-search", jwt, { filters, pages })) as LeadSearchResult;
+}
+
+/** POST /mcp/company-search — FREE company search. */
+export async function companySearch(
+  apiBase: string,
+  jwt: string,
+  filters: CompanySearchFilters,
+  pages: number,
+): Promise<CompanySearchResult> {
+  return (await postJson(apiBase, "/mcp/company-search", jwt, { filters, pages })) as CompanySearchResult;
+}
+
+/**
+ * POST /mcp/search-enrich — CHARGED per lookup (channel tagged 'mcp' server-side).
+ * Resolves contact details for a lead by its `id` (from lead_search), NOT a URL.
+ */
+export async function leadEnrich(
+  apiBase: string,
+  jwt: string,
+  lead_id: string,
+  types: string[],
+): Promise<LeadEnrichResult> {
+  return (await postJson(apiBase, "/mcp/search-enrich", jwt, { lead_id, types })) as LeadEnrichResult;
 }
 
 export async function exchangePassword(
   apiBase: string,
   id: string,
   password: string,
-): Promise<{ access_token: string }> {
-  const res = await fetch(`${apiBase}/webhook/token`, {
+): Promise<{ access_token: string; email?: string; token_expires_in?: string }> {
+  const res = await fetch(`${apiBase}/token`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id, password }),
   });
   if (!res.ok) throw new Error(`token exchange failed: ${res.status}`);
-  return (await res.json()) as { access_token: string };
+  return (await res.json()) as {
+    access_token: string;
+    email?: string;
+    token_expires_in?: string;
+  };
 }
 
 /**

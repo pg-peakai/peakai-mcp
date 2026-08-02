@@ -3,6 +3,14 @@ main = "src/index.ts"
 compatibility_date = "2026-04-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Connector custom domain. On a different zone than build.thepeakai.com on
+# purpose: a worker calling a same-zone worker-fronted hostname mis-routes, so
+# mcp.thepeakai.com could not reach the backend. linkedinenrich.com is a
+# separate zone, so the outbound call to build.thepeakai.com routes normally.
+[[routes]]
+pattern = "mcp.linkedinenrich.com"
+custom_domain = true
+
 # Bind a KV namespace for OAuth session storage.
 # Create with: wrangler kv:namespace create SESSIONS
 # Then paste the returned id below.
@@ -12,10 +20,7 @@ id = "43340ab514934ae1b33de9b1290cd98a"
 preview_id = "86efdad3cf734466a56fc008eca6763c"
 
 [vars]
-# NOTE: temporarily kept on automation.sayf.in — build.thepeakai.com does not
-# expose the lookup REST path (/webhook/extractor1 -> 404) yet. Flip to
-# https://build.thepeakai.com once that endpoint is live on the new backend.
-PEAKAI_API_BASE = "https://automation.sayf.in"
+PEAKAI_API_BASE = "https://build.thepeakai.com"
 STUDIO_BASE = "https://studio.thepeakai.com"
 NHOST_AUTH_BASE = "https://yobugvzhlfuxviaptquw.auth.ap-south-1.nhost.run"
 

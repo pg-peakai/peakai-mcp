@@ -1,4 +1,13 @@
-import { callExtractor, getCredits, type ExtractorType } from "./peakai";
+import {
+  callExtractor,
+  getCredits,
+  leadSearch,
+  companySearch,
+  leadEnrich,
+  type ExtractorType,
+  type LeadSearchFilters,
+  type CompanySearchFilters,
+} from "./peakai";
 
 export interface ToolDef {
   name: string;
@@ -80,6 +89,10 @@ const BULK_TYPES: Record<string, { field: string; label: string }> = {
 
 const BULK_MAX = 250;
 
+// Beta: search tools return only a small sample to the agent — the human opens
+// view_url to confirm before we trust bulk output.
+const SAMPLE_ROWS = 5;
+
 function interpretResult(type: string, result: Record<string, unknown>) {
   const raw = result[BULK_TYPES[type]!.field];
   const notFound =
@@ -119,7 +132,7 @@ export const TOOLS: ToolDef[] = [
     "enrich_profile",
     "Enrich LinkedIn profile",
     "Fetch the full LinkedIn profile (name, headline, experience, education, etc.).",
-    "profile_enrichment",
+    "enrich",
   ),
   makeDirectorTool(
     "find_director_phone",
@@ -257,6 +270,139 @@ export const TOOLS: ToolDef[] = [
         ...(aborted ? { aborted } : {}),
         results,
       };
+    },
+  },
+  {
+    name: "lead_search",
+    title: "Lead search (find people by filters)",
+    description:
+      "Search PeakAI's lead database for PEOPLE by filters (job titles, companies, locations, industries, company headcount). FREE — no credits charged. " +
+      "Returns a saved search plus a SHORT sample (~5 rows) — not the full list. " +
+      "WORKFLOW: (1) call lead_search, (2) open the returned view_url and confirm the results look right, " +
+      "(3) take a lead's `id` from the results and call lead_enrich(lead_id, types) to get contact details. " +
+      "Note: a lead's linkedin_url is id-form — do NOT feed it into bulk_lookup; lead_enrich resolves it from the id.",
+    readOnlyHint: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        filters: {
+          type: "object",
+          description: "Lead filters. All optional; combine to narrow results.",
+          properties: {
+            search: { type: "string", description: "Free-text keyword search." },
+            jobTitles: { type: "array", items: { type: "string" }, description: "Job titles to match, e.g. [\"Head of Sales\", \"CMO\"]." },
+            companies: { type: "array", items: { type: "string" }, description: "Company names to match." },
+            locations: { type: "array", items: { type: "string" }, description: "Locations, e.g. [\"Bangalore\", \"United States\"]." },
+            industries: { type: "array", items: { type: "string" }, description: "Industries to match." },
+            companyHeadcount: { type: "array", items: { type: "string" }, description: "Company size bands, e.g. [\"11-50\", \"51-200\"]." },
+            maxPerCompany: { type: "number", description: "Cap leads returned per company." },
+          },
+        },
+        pages: { type: "number", description: "Number of result pages to fetch (default 1)." },
+      },
+      required: ["filters"],
+    },
+    async run(args, { jwt, apiBase }) {
+      const filters = (args.filters ?? {}) as LeadSearchFilters;
+      const pages = typeof args.pages === "number" ? args.pages : 1;
+      const r = await leadSearch(apiBase, jwt, filters, pages);
+      const sample = (r.leads ?? []).slice(0, SAMPLE_ROWS);
+      return {
+        message: `Found ${r.count} of ${r.total}. Verify: ${r.view_url}`,
+        search_id: r.search_id,
+        count: r.count,
+        total: r.total,
+        view_url: r.view_url,
+        sample,
+        note:
+          "Beta: only a sample is shown — open view_url to confirm before trusting the results. " +
+          "To get contact details, take a lead `id` above and call lead_enrich(lead_id, types).",
+      };
+    },
+  },
+  {
+    name: "company_search",
+    title: "Company search (find companies by filters)",
+    description:
+      "Search PeakAI's database for COMPANIES by filters (industries, locations, headcount). FREE — no credits charged. " +
+      "Returns a saved search plus a SHORT sample (~5 rows) — not the full list. " +
+      "Open the returned view_url to review the full set before relying on it.",
+    readOnlyHint: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        filters: {
+          type: "object",
+          description: "Company filters. All optional; combine to narrow results.",
+          properties: {
+            search: { type: "string", description: "Free-text keyword search." },
+            industries: { type: "array", items: { type: "string" }, description: "Industries to match." },
+            locations: { type: "array", items: { type: "string" }, description: "Locations to match." },
+            headcount: { type: "array", items: { type: "string" }, description: "Company size bands, e.g. [\"11-50\", \"51-200\"]." },
+          },
+        },
+        pages: { type: "number", description: "Number of result pages to fetch (default 1)." },
+      },
+      required: ["filters"],
+    },
+    async run(args, { jwt, apiBase }) {
+      const filters = (args.filters ?? {}) as CompanySearchFilters;
+      const pages = typeof args.pages === "number" ? args.pages : 1;
+      const r = await companySearch(apiBase, jwt, filters, pages);
+      const sample = (r.companies ?? []).slice(0, SAMPLE_ROWS);
+      return {
+        message: `Found ${r.count} of ${r.total}. Verify: ${r.view_url}`,
+        search_id: r.search_id,
+        count: r.count,
+        total: r.total,
+        view_url: r.view_url,
+        sample,
+        note: "Beta: only a sample is shown — open view_url to confirm before trusting the results.",
+      };
+    },
+  },
+  {
+    name: "lead_enrich",
+    title: "Enrich a lead (phone / email)",
+    description:
+      "Get contact details (phone, personal email, work email) for a lead found via lead_search. CHARGED per lookup type. " +
+      "Pass the lead's `id` from lead_search results — NOT a URL. Returns arrays per type; an empty array means none were found.",
+    readOnlyHint: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        lead_id: {
+          type: "string",
+          description: "The lead `id` from lead_search results (not a linkedin_url).",
+        },
+        types: {
+          type: "array",
+          items: { type: "string", enum: ["phone_no", "email", "work_email"] },
+          description: "Which contacts to fetch: phone_no, email (personal), work_email. Each is charged.",
+        },
+      },
+      required: ["lead_id", "types"],
+    },
+    async run(args, { jwt, apiBase }) {
+      const lead_id = String(args.lead_id ?? "").trim();
+      if (!lead_id) throw new Error("lead_id is required (the `id` from lead_search, not a URL)");
+      if (LINKEDIN_RE.test(lead_id)) {
+        throw new Error("Pass the lead `id` from lead_search results, not a linkedin_url — lead_enrich resolves the id.");
+      }
+      const input = Array.isArray(args.types) ? args.types : [];
+      const seen = new Set<string>();
+      const types: string[] = [];
+      for (const t of input) {
+        const type = String(t ?? "").trim();
+        if (type && type in BULK_TYPES && !seen.has(type)) {
+          seen.add(type);
+          types.push(type);
+        }
+      }
+      if (types.length === 0) {
+        throw new Error("types must be a non-empty array of: phone_no, email, work_email");
+      }
+      return await leadEnrich(apiBase, jwt, lead_id, types);
     },
   },
   {
