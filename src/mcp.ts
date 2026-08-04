@@ -1,5 +1,26 @@
 import { TOOLS, TOOLS_BY_NAME } from "./tools";
 
+// Server-level guidance surfaced to the connecting agent on `initialize`.
+// This is the single highest-leverage place to shape how the model uses the
+// toolset — keep it tight, imperative, and free of vendor names.
+const SERVER_INSTRUCTIONS = [
+  "PeakAI is a B2B lead-generation and contact-enrichment API.",
+  "",
+  "CORE WORKFLOW (find people → get their contacts):",
+  "1. search_filters — fetch exact filter values (industries, seniority, functions, headcount). FREE.",
+  "2. lead_search — find PEOPLE by those filters. FREE. Returns a saved search + a ~5-row sample.",
+  "3. Open the returned view_url and confirm the results look right (beta: the human verifies before bulk trust).",
+  "4. lead_enrich(lead_id, types) — reveal phone/email for a specific lead. CHARGED per type.",
+  "",
+  "RULES:",
+  "- Searches are FREE but have a daily quota; enrichment is CHARGED. Enrich only the leads the user actually wants, and only the types needed — prefer work_email for B2B outreach.",
+  "- lead_enrich takes a lead `id` from lead_search results, NEVER a URL. The find_* / bulk_lookup tools take a real linkedin.com profile URL instead.",
+  "- For id/enum filters (industries, seniority, functions, headcount) call search_filters first and pass an exact id or label — guessed values match nothing.",
+  "- If a search returns total 0, broaden the filters (drop industry/headcount, fewer job titles, wider location) and retry — it's free. Check `ignored_filters` in the response for filters that didn't apply.",
+  "- Pagination is per-page (25 leads / 50 companies per page). To go deeper, call again with the SAME search_id and the next page number.",
+  "- company_search finds COMPANIES; to reach people at them, run lead_search with companies:[...].",
+].join("\n");
+
 interface JsonRpcReq {
   jsonrpc: "2.0";
   id?: string | number | null;
@@ -26,6 +47,7 @@ export async function handleMcp(
         protocolVersion: "2025-06-18",
         capabilities: { tools: {} },
         serverInfo: { name: "peakai-mcp", version: "0.1.0" },
+        instructions: SERVER_INSTRUCTIONS,
       });
 
     case "notifications/initialized":

@@ -27,6 +27,13 @@ export function mapBackendError(status: number, body: string): string {
   if (status === 403 || b.includes("not enabled") || b.includes("api access")) {
     return "API access is not enabled for your account. Email studio@thepeakai.com to enable it.";
   }
+  if (status === 429 || b.includes("daily") || b.includes("too many")) {
+    return "Daily free search limit reached. Try again tomorrow, or narrow your filters and reuse the same search_id to page further.";
+  }
+  if (status === 400) {
+    // Never echo the raw body (can leak the data vendor). Point at the fix.
+    return "Invalid search request — check your filter values with search_filters (use exact ids/labels).";
+  }
   return `PeakAI request failed (${status})`;
 }
 
@@ -95,10 +102,19 @@ async function postJson(
 export interface LeadSearchFilters {
   search?: string;
   jobTitles?: string[];
+  pastJobTitles?: string[];
   companies?: string[];
+  pastCompanies?: string[];
   locations?: string[];
+  companyHeadquarterLocations?: string[];
   industries?: string[];
   companyHeadcount?: string[];
+  seniorityLevelIds?: string[];
+  functionIds?: string[];
+  recentlyChangedJobs?: boolean;
+  excludeCurrentCompanies?: string[];
+  excludeCurrentJobTitles?: string[];
+  excludeLocations?: string[];
   maxPerCompany?: number;
 }
 
@@ -108,6 +124,8 @@ export interface LeadSearchResult {
   count: number;
   view_url: string;
   leads: Array<Record<string, unknown>>;
+  result_cap?: number;
+  ignored_filters?: unknown;
 }
 
 export interface CompanySearchFilters {
@@ -123,6 +141,8 @@ export interface CompanySearchResult {
   count: number;
   view_url: string;
   companies: Array<Record<string, unknown>>;
+  result_cap?: number;
+  ignored_filters?: unknown;
 }
 
 export interface LeadEnrichResult {
@@ -133,24 +153,47 @@ export interface LeadEnrichResult {
   work_email: string[];
 }
 
-/** POST /mcp/lead-search — FREE lead search. Returns a persisted search + leads. */
+/**
+ * POST /mcp/lead-search — FREE lead search. Returns a persisted search + one
+ * page of leads (25 per page). Pass `searchId` from a prior call to append the
+ * next page under the same search instead of starting a new one.
+ */
 export async function leadSearch(
   apiBase: string,
   jwt: string,
   filters: LeadSearchFilters,
-  pages: number,
+  page: number,
+  searchId?: string,
 ): Promise<LeadSearchResult> {
-  return (await postJson(apiBase, "/mcp/lead-search", jwt, { filters, pages })) as LeadSearchResult;
+  const body: Record<string, unknown> = { filters, page };
+  if (searchId) body.search_id = searchId;
+  return (await postJson(apiBase, "/mcp/lead-search", jwt, body)) as LeadSearchResult;
 }
 
-/** POST /mcp/company-search — FREE company search. */
+/** POST /mcp/company-search — FREE company search. One page = 50 companies. */
 export async function companySearch(
   apiBase: string,
   jwt: string,
   filters: CompanySearchFilters,
-  pages: number,
+  page: number,
+  searchId?: string,
 ): Promise<CompanySearchResult> {
-  return (await postJson(apiBase, "/mcp/company-search", jwt, { filters, pages })) as CompanySearchResult;
+  const body: Record<string, unknown> = { filters, page };
+  if (searchId) body.search_id = searchId;
+  return (await postJson(apiBase, "/mcp/company-search", jwt, body)) as CompanySearchResult;
+}
+
+/**
+ * GET /mcp/filter-options — public reference data (no auth): valid ids/labels
+ * for the enum-style filters (industries, seniority, functions, headcount, …).
+ * Fetch this to build precise searches; guessed enum values match nothing.
+ */
+export async function getFilterOptions(apiBase: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${apiBase}/mcp/filter-options`, {
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok) throw new Error(mapBackendError(res.status, await res.text()));
+  return (await res.json()) as Record<string, unknown>;
 }
 
 /**

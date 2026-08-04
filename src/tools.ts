@@ -1,6 +1,7 @@
 import {
   callExtractor,
   getCredits,
+  getFilterOptions,
   leadSearch,
   companySearch,
   leadEnrich,
@@ -92,6 +93,19 @@ const BULK_MAX = 250;
 // Beta: search tools return only a small sample to the agent — the human opens
 // view_url to confirm before we trust bulk output.
 const SAMPLE_ROWS = 5;
+
+// Exact company-size bands the backend accepts (from /mcp/filter-options).
+// Bake them into the schema so the agent never guesses an invalid band.
+const HEADCOUNT_BANDS = [
+  "1-10",
+  "11-50",
+  "51-200",
+  "201-500",
+  "501-1000",
+  "1001-5000",
+  "5001-10000",
+  "10001+",
+];
 
 function interpretResult(type: string, result: Record<string, unknown>) {
   const raw = result[BULK_TYPES[type]!.field];
@@ -273,50 +287,78 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "search_filters",
+    title: "List valid search filter values",
+    description:
+      "Return the exact allowed values for the enum-style search filters used by lead_search and company_search: industries (id+label), seniority_levels, functions, years_of_experience, years_at_current_company, company_headcount, profile_languages. FREE. " +
+      "Call this FIRST whenever you plan to filter by industry, seniority, function, or headcount — passing a guessed value matches nothing. Pass the id or label back in the corresponding filter (e.g. seniorityLevelIds, functionIds, industries).",
+    readOnlyHint: true,
+    inputSchema: { type: "object", properties: {}, required: [] },
+    async run(_args, { apiBase }) {
+      return await getFilterOptions(apiBase);
+    },
+  },
+  {
     name: "lead_search",
     title: "Lead search (find people by filters)",
     description:
-      "Search PeakAI's lead database for PEOPLE by filters (job titles, companies, locations, industries, company headcount). FREE — no credits charged. " +
-      "Returns a saved search plus a SHORT sample (~5 rows) — not the full list. " +
-      "WORKFLOW: (1) call lead_search, (2) open the returned view_url and confirm the results look right, " +
-      "(3) take a lead's `id` from the results and call lead_enrich(lead_id, types) to get contact details. " +
-      "Note: a lead's linkedin_url is id-form — do NOT feed it into bulk_lookup; lead_enrich resolves it from the id.",
+      "Find PEOPLE in PeakAI's lead database by filters (job titles, seniority, function, companies, locations, industries, company headcount). FREE — no credits charged, but a daily search quota applies. " +
+      "Returns one page of 25 leads as a saved search, plus a SHORT ~5-row sample (not the full page). " +
+      "WORKFLOW: (1) if using industry/seniority/function/headcount filters, call search_filters first for exact values; (2) call lead_search; (3) open the returned view_url and confirm the results look right; (4) take a lead's `id` and call lead_enrich(lead_id, types) for contact details. " +
+      "PAGINATION: 25 leads per page. For more, call again with the SAME search_id and page+1. " +
+      "IF total IS 0: broaden the filters (drop industry/headcount, fewer titles, wider location) and retry — it's free. Check `ignored_filters` for filters that didn't apply. " +
+      "NEVER feed a lead's linkedin_url into bulk_lookup — it's id-form; lead_enrich resolves it from the `id`.",
     readOnlyHint: true,
     inputSchema: {
       type: "object",
       properties: {
         filters: {
           type: "object",
-          description: "Lead filters. All optional; combine to narrow results.",
+          description: "Lead filters. All optional; combine to narrow results. For industries/seniorityLevelIds/functionIds use exact ids or labels from search_filters.",
           properties: {
-            search: { type: "string", description: "Free-text keyword search." },
-            jobTitles: { type: "array", items: { type: "string" }, description: "Job titles to match, e.g. [\"Head of Sales\", \"CMO\"]." },
-            companies: { type: "array", items: { type: "string" }, description: "Company names to match." },
-            locations: { type: "array", items: { type: "string" }, description: "Locations, e.g. [\"Bangalore\", \"United States\"]." },
-            industries: { type: "array", items: { type: "string" }, description: "Industries to match." },
-            companyHeadcount: { type: "array", items: { type: "string" }, description: "Company size bands, e.g. [\"11-50\", \"51-200\"]." },
-            maxPerCompany: { type: "number", description: "Cap leads returned per company." },
+            search: { type: "string", description: "Free-text keyword search across the profile." },
+            jobTitles: { type: "array", items: { type: "string" }, description: "Current job titles to match, e.g. [\"Head of Sales\", \"CMO\"]." },
+            pastJobTitles: { type: "array", items: { type: "string" }, description: "Titles the person held previously." },
+            companies: { type: "array", items: { type: "string" }, description: "Current employer names to match." },
+            pastCompanies: { type: "array", items: { type: "string" }, description: "Former employer names." },
+            locations: { type: "array", items: { type: "string" }, description: "Person locations, e.g. [\"Bangalore\", \"United States\"]." },
+            companyHeadquarterLocations: { type: "array", items: { type: "string" }, description: "Filter by where the person's company is headquartered." },
+            industries: { type: "array", items: { type: "string" }, description: "Industry ids or labels (see search_filters → industries)." },
+            seniorityLevelIds: { type: "array", items: { type: "string" }, description: "Seniority ids or labels (see search_filters → seniority_levels), e.g. \"CXO\", \"Director\"." },
+            functionIds: { type: "array", items: { type: "string" }, description: "Job-function ids or labels (see search_filters → functions), e.g. \"Engineering\", \"Sales\"." },
+            companyHeadcount: { type: "array", items: { type: "string", enum: HEADCOUNT_BANDS }, description: "Company size bands. Allowed: " + HEADCOUNT_BANDS.join(", ") + "." },
+            recentlyChangedJobs: { type: "boolean", description: "Only people who recently changed jobs (a strong outreach signal)." },
+            excludeCurrentCompanies: { type: "array", items: { type: "string" }, description: "Exclude people currently at these companies (e.g. your own customers)." },
+            excludeCurrentJobTitles: { type: "array", items: { type: "string" }, description: "Exclude these current titles." },
+            excludeLocations: { type: "array", items: { type: "string" }, description: "Exclude these locations." },
+            maxPerCompany: { type: "number", description: "Cap leads returned per company (spreads results across more companies)." },
           },
         },
-        pages: { type: "number", description: "Number of result pages to fetch (default 1)." },
+        page: { type: "number", description: "1-based page number (25 leads per page). Default 1. To page deeper, keep search_id and increment this." },
+        search_id: { type: "string", description: "Reuse a search_id from a prior call to append the next page under the same search instead of starting over." },
       },
       required: ["filters"],
     },
     async run(args, { jwt, apiBase }) {
       const filters = (args.filters ?? {}) as LeadSearchFilters;
-      const pages = typeof args.pages === "number" ? args.pages : 1;
-      const r = await leadSearch(apiBase, jwt, filters, pages);
+      const page = typeof args.page === "number" && args.page > 0 ? args.page : 1;
+      const search_id = typeof args.search_id === "string" ? args.search_id : undefined;
+      const r = await leadSearch(apiBase, jwt, filters, page, search_id);
       const sample = (r.leads ?? []).slice(0, SAMPLE_ROWS);
       return {
-        message: `Found ${r.count} of ${r.total}. Verify: ${r.view_url}`,
+        message: `Found ${r.count} of ${r.total} (page ${page}, 25/page). Verify: ${r.view_url}`,
         search_id: r.search_id,
+        page,
         count: r.count,
         total: r.total,
         view_url: r.view_url,
+        ...(r.result_cap !== undefined ? { result_cap: r.result_cap } : {}),
+        ...(r.ignored_filters ? { ignored_filters: r.ignored_filters } : {}),
         sample,
         note:
-          "Beta: only a sample is shown — open view_url to confirm before trusting the results. " +
-          "To get contact details, take a lead `id` above and call lead_enrich(lead_id, types).",
+          "Beta: only a ~5-row sample is shown — open view_url to confirm before trusting the full set. " +
+          "To get contacts, take a lead `id` above and call lead_enrich(lead_id, types). " +
+          (r.total > r.count ? "More results exist — reuse this search_id with page+1." : ""),
       };
     },
   },
@@ -324,40 +366,49 @@ export const TOOLS: ToolDef[] = [
     name: "company_search",
     title: "Company search (find companies by filters)",
     description:
-      "Search PeakAI's database for COMPANIES by filters (industries, locations, headcount). FREE — no credits charged. " +
-      "Returns a saved search plus a SHORT sample (~5 rows) — not the full list. " +
-      "Open the returned view_url to review the full set before relying on it.",
+      "Find COMPANIES in PeakAI's database by filters (industries, locations, headcount). FREE — no credits charged, daily search quota applies. " +
+      "Returns one page of 50 companies as a saved search, plus a SHORT ~5-row sample. " +
+      "To reach the PEOPLE at these companies, take their names and run lead_search with companies:[...] (+ jobTitles/seniority). " +
+      "PAGINATION: 50 companies per page — for more, call again with the SAME search_id and page+1. " +
+      "IF total IS 0: broaden the filters and retry (it's free); check `ignored_filters` for filters that didn't apply.",
     readOnlyHint: true,
     inputSchema: {
       type: "object",
       properties: {
         filters: {
           type: "object",
-          description: "Company filters. All optional; combine to narrow results.",
+          description: "Company filters. All optional; combine to narrow results. Use exact industry ids/labels from search_filters.",
           properties: {
-            search: { type: "string", description: "Free-text keyword search." },
-            industries: { type: "array", items: { type: "string" }, description: "Industries to match." },
-            locations: { type: "array", items: { type: "string" }, description: "Locations to match." },
-            headcount: { type: "array", items: { type: "string" }, description: "Company size bands, e.g. [\"11-50\", \"51-200\"]." },
+            search: { type: "string", description: "Free-text keyword search across company data." },
+            industries: { type: "array", items: { type: "string" }, description: "Industry ids or labels (see search_filters → industries)." },
+            locations: { type: "array", items: { type: "string" }, description: "Company locations to match." },
+            headcount: { type: "array", items: { type: "string", enum: HEADCOUNT_BANDS }, description: "Company size bands. Allowed: " + HEADCOUNT_BANDS.join(", ") + "." },
           },
         },
-        pages: { type: "number", description: "Number of result pages to fetch (default 1)." },
+        page: { type: "number", description: "1-based page number (50 companies per page). Default 1." },
+        search_id: { type: "string", description: "Reuse a search_id from a prior call to append the next page under the same search." },
       },
       required: ["filters"],
     },
     async run(args, { jwt, apiBase }) {
       const filters = (args.filters ?? {}) as CompanySearchFilters;
-      const pages = typeof args.pages === "number" ? args.pages : 1;
-      const r = await companySearch(apiBase, jwt, filters, pages);
+      const page = typeof args.page === "number" && args.page > 0 ? args.page : 1;
+      const search_id = typeof args.search_id === "string" ? args.search_id : undefined;
+      const r = await companySearch(apiBase, jwt, filters, page, search_id);
       const sample = (r.companies ?? []).slice(0, SAMPLE_ROWS);
       return {
-        message: `Found ${r.count} of ${r.total}. Verify: ${r.view_url}`,
+        message: `Found ${r.count} of ${r.total} (page ${page}, 50/page). Verify: ${r.view_url}`,
         search_id: r.search_id,
+        page,
         count: r.count,
         total: r.total,
         view_url: r.view_url,
+        ...(r.result_cap !== undefined ? { result_cap: r.result_cap } : {}),
+        ...(r.ignored_filters ? { ignored_filters: r.ignored_filters } : {}),
         sample,
-        note: "Beta: only a sample is shown — open view_url to confirm before trusting the results.",
+        note:
+          "Beta: only a ~5-row sample is shown — open view_url to confirm before trusting the full set. " +
+          (r.total > r.count ? "More results exist — reuse this search_id with page+1." : ""),
       };
     },
   },
@@ -365,8 +416,9 @@ export const TOOLS: ToolDef[] = [
     name: "lead_enrich",
     title: "Enrich a lead (phone / email)",
     description:
-      "Get contact details (phone, personal email, work email) for a lead found via lead_search. CHARGED per lookup type. " +
-      "Pass the lead's `id` from lead_search results — NOT a URL. Returns arrays per type; an empty array means none were found.",
+      "Get contact details (phone, personal email, work email) for a lead found via lead_search. CHARGED per lookup type — each entry in `types` is a separate charge. " +
+      "Only request the types the user actually needs (prefer work_email for B2B outreach), and only for the specific leads they want — do NOT bulk-enrich a whole search. " +
+      "Pass the lead's `id` from lead_search results — NOT a URL. Returns arrays per type; an empty array means none were found (still counts as a lookup).",
     readOnlyHint: true,
     inputSchema: {
       type: "object",
