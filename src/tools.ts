@@ -2,6 +2,7 @@ import {
   callExtractor,
   getCredits,
   getFilterOptions,
+  getSearches,
   leadSearch,
   companySearch,
   leadEnrich,
@@ -304,6 +305,115 @@ export const TOOLS: ToolDef[] = [
     inputSchema: { type: "object", properties: {}, required: [] },
     async run(_args, { apiBase }) {
       return await getFilterOptions(apiBase);
+    },
+  },
+  {
+    name: "recent_searches",
+    title: "Recent searches (memory)",
+    description:
+      "List the user's own recent searches — each with its name, kind (lead/company), and how many rows were found / enriched / exported. FREE. " +
+      "Call this at the START of a session to recall what they searched before, continue prior work, and reuse their targeting (their ideal-customer profile emerges from the pattern). High enriched/exported counts mark the searches they actually valued.",
+    readOnlyHint: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "How many recent searches to return (default 10, max 50)." },
+      },
+      required: [],
+    },
+    async run(args, { jwt, apiBase }) {
+      let limit = typeof args.limit === "number" ? Math.floor(args.limit) : 10;
+      if (limit < 1) limit = 1;
+      if (limit > 50) limit = 50;
+      const r = await getSearches(apiBase, jwt, limit);
+      return {
+        total: r.total,
+        searches: r.searches,
+        note:
+          "These are the user's past searches. Reuse a search_id to page/enrich/export it, or infer their target and prefill filters for a new lead_search.",
+      };
+    },
+  },
+  {
+    name: "lookalike_search",
+    title: "Look-alike search (find people like a LinkedIn profile)",
+    description:
+      "Give ONE LinkedIn profile URL; this enriches it, learns the person's role/company/location, and runs a first-pass lead_search for SIMILAR people — 'here are more like this one'. " +
+      "The anchor enrichment is CHARGED as a single lookup; the resulting people-search is FREE. " +
+      "Returns the anchor summary, the derived_filters it used, and a sample of look-alikes with lead_ids + view_url. " +
+      "TO SHARPEN: call search_filters, then re-run lead_search adding the industries / seniorityLevelIds / functionIds / companyHeadcount that match the anchor — the LLM reading the anchor profile picks these best. " +
+      "By default it excludes the anchor's own company so you get peers elsewhere, not their colleagues.",
+    readOnlyHint: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        profile_url: {
+          type: "string",
+          description: "Full LinkedIn profile URL of the person to find look-alikes of.",
+        },
+        exclude_same_company: {
+          type: "boolean",
+          description: "Exclude people at the anchor's current company (default true — you usually want peers elsewhere).",
+        },
+        page: { type: "number", description: "1-based page of look-alikes (25/page). Default 1." },
+      },
+      required: ["profile_url"],
+    },
+    async run(args, { jwt, apiBase }) {
+      const profile_url = String(args.profile_url ?? "").trim();
+      if (!LINKEDIN_RE.test(profile_url)) throw new Error("profile_url must be a linkedin.com URL");
+      const excludeSame = args.exclude_same_company !== false;
+      const page = typeof args.page === "number" && args.page > 0 ? args.page : 1;
+
+      // Enrich the anchor (charged) and read its profile blob defensively —
+      // provider field names vary, so try several keys for each signal.
+      const enriched = (await callExtractor(apiBase, jwt, "enrich", { profile_url })) as Record<string, any>;
+      const data = (enriched.enrichment_data ?? enriched) as Record<string, any>;
+      const basic = (data.basic_info ?? {}) as Record<string, any>;
+      const exp = Array.isArray(data.experience) ? (data.experience as any[]) : [];
+      const cur = (exp[0] ?? {}) as Record<string, any>;
+      const firstStr = (...vals: unknown[]): string | undefined => {
+        for (const v of vals) if (typeof v === "string" && v.trim()) return v.trim();
+        return undefined;
+      };
+      const anchor = {
+        name: firstStr(basic.fullname, basic.full_name, basic.name),
+        headline: firstStr(basic.headline, basic.occupation, basic.sub_title),
+        title: firstStr(cur.title, cur.position, basic.job_title, basic.occupation),
+        company: firstStr(cur.companyName, cur.company, basic.current_company, basic.company),
+        location: firstStr(basic.location, basic.location_name, basic.geo, basic.city, basic.country),
+      };
+
+      const filters: LeadSearchFilters = {};
+      if (anchor.title) filters.jobTitles = [anchor.title];
+      if (anchor.location) filters.locations = [anchor.location];
+      if (anchor.headline) filters.search = anchor.headline;
+      if (excludeSame && anchor.company) filters.excludeCurrentCompanies = [anchor.company];
+
+      let results: Record<string, unknown> | null = null;
+      if (filters.jobTitles || filters.search) {
+        const r = await leadSearch(apiBase, jwt, filters, page);
+        results = {
+          message: `Found ${r.count} of ${r.total} look-alikes (page ${page}, 25/page). Verify: ${r.view_url}`,
+          search_id: r.search_id,
+          count: r.count,
+          total: r.total,
+          view_url: r.view_url,
+          lead_ids: (r.leads ?? []).map((l) => l.id).filter(Boolean),
+          sample: (r.leads ?? []).slice(0, SAMPLE_ROWS),
+        };
+      }
+
+      return {
+        anchor,
+        derived_filters: filters,
+        results,
+        note:
+          "First pass uses the anchor's title + location only. To sharpen, read the anchor above, call search_filters, " +
+          "and re-run lead_search adding industries / seniorityLevelIds / functionIds / companyHeadcount that fit. " +
+          "The anchor enrichment was charged as one lookup; the look-alike search is free." +
+          (results ? "" : " (No search ran — the profile lacked a usable title/headline; build lead_search manually from the anchor.)"),
+      };
     },
   },
   {

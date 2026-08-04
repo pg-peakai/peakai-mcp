@@ -196,6 +196,34 @@ export async function getFilterOptions(apiBase: string): Promise<Record<string, 
   return (await res.json()) as Record<string, unknown>;
 }
 
+export interface SearchSummary {
+  search_id: string;
+  search_name: string | null;
+  kind: "lead" | "company";
+  total_rows: number;
+  enriched_rows: number;
+  exported_rows: number;
+  created_at: string;
+  updated_at?: string | null;
+}
+
+/**
+ * GET /mcp/searches — the user's own recent searches (one row each, with
+ * found/enriched/exported counts). This is the "memory" the agent can recall to
+ * continue prior work and reuse a person's targeting across sessions.
+ */
+export async function getSearches(
+  apiBase: string,
+  jwt: string,
+  limit: number,
+): Promise<{ searches: SearchSummary[]; total: number }> {
+  const res = await fetch(`${apiBase}/mcp/searches?limit=${limit}`, {
+    headers: { Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
+  });
+  if (!res.ok) throw new Error(mapBackendError(res.status, await res.text()));
+  return (await res.json()) as { searches: SearchSummary[]; total: number };
+}
+
 /**
  * POST /mcp/search-enrich — CHARGED per lookup (channel tagged 'mcp' server-side).
  * Resolves contact details for a lead by its `id` (from lead_search), NOT a URL.

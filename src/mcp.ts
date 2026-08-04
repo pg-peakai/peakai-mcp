@@ -6,9 +6,12 @@ import { TOOLS, TOOLS_BY_NAME } from "./tools";
 const SERVER_INSTRUCTIONS = [
   "PeakAI is a B2B lead-generation and contact-enrichment API.",
   "",
+  "START OF SESSION: call recent_searches to recall the user's past searches and targeting — build on them instead of starting cold.",
+  "",
   "CORE WORKFLOW (find people → get their contacts):",
   "1. search_filters — fetch exact filter values (industries, seniority, functions, headcount). FREE.",
   "2. lead_search — find PEOPLE by those filters. FREE. Returns a saved search + a ~5-row sample + the page's lead_ids.",
+  "   • Given a LinkedIn URL and asked for 'similar people' → lookalike_search(profile_url): it enriches that profile and auto-runs a look-alike search you then refine.",
   "3. Open the returned view_url and confirm the results look right (beta: the human verifies before bulk trust).",
   "4. Get contacts:",
   "   - ONE lead, quick spot-check → lead_enrich(lead_id, types).",
