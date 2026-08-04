@@ -209,6 +209,35 @@ export async function leadEnrich(
   return (await postJson(apiBase, "/mcp/search-enrich", jwt, { lead_id, types })) as LeadEnrichResult;
 }
 
+export interface BulkEnrichResult {
+  enriched_count: number;
+  credits_charged: number;
+  credits_remaining: number | null;
+  charged_rows: number;
+  leads: Array<Record<string, unknown>>;
+}
+
+/**
+ * POST /mcp/lead-export — bulk reveal-and-export MANY searched leads in ONE
+ * call. The backend resolves + enriches the not-yet-revealed rows concurrently
+ * (8 at a time) and bills them as a single batch; already-revealed rows are
+ * free. This is the efficient path for 50–100+ leads — far fewer round-trips
+ * and tokens than looping leadEnrich per lead.
+ */
+export async function bulkEnrich(
+  apiBase: string,
+  jwt: string,
+  searchId: string,
+  leadIds: string[],
+  types: string[],
+): Promise<BulkEnrichResult> {
+  return (await postJson(apiBase, "/mcp/lead-export", jwt, {
+    search_id: searchId,
+    lead_ids: leadIds,
+    enrich_types: types,
+  })) as BulkEnrichResult;
+}
+
 export async function exchangePassword(
   apiBase: string,
   id: string,

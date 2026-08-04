@@ -5,6 +5,7 @@ import {
   leadSearch,
   companySearch,
   leadEnrich,
+  bulkEnrich,
   type ExtractorType,
   type LeadSearchFilters,
   type CompanySearchFilters,
@@ -89,6 +90,11 @@ const BULK_TYPES: Record<string, { field: string; label: string }> = {
 };
 
 const BULK_MAX = 250;
+
+// Cap per bulk_enrich call. Enrichment waterfalls are slow (seconds each), so a
+// batch this size keeps one call comfortably inside the connector's timeout;
+// larger selections should be split into batches (~50 is snappiest).
+const BULK_ENRICH_MAX = 100;
 
 // Beta: search tools return only a small sample to the agent — the human opens
 // view_url to confirm before we trust bulk output.
@@ -354,10 +360,14 @@ export const TOOLS: ToolDef[] = [
         view_url: r.view_url,
         ...(r.result_cap !== undefined ? { result_cap: r.result_cap } : {}),
         ...(r.ignored_filters ? { ignored_filters: r.ignored_filters } : {}),
+        // Compact id list for this page so you can bulk_enrich without dumping
+        // full rows into context. UUIDs only — the data stays behind view_url.
+        lead_ids: (r.leads ?? []).map((l) => l.id).filter(Boolean),
         sample,
         note:
           "Beta: only a ~5-row sample is shown — open view_url to confirm before trusting the full set. " +
-          "To get contacts, take a lead `id` above and call lead_enrich(lead_id, types). " +
+          "For MANY contacts, pass search_id + lead_ids (above) to bulk_enrich in ONE call — do NOT loop lead_enrich. " +
+          "For a single lead, call lead_enrich(lead_id, types). " +
           (r.total > r.count ? "More results exist — reuse this search_id with page+1." : ""),
       };
     },
@@ -455,6 +465,105 @@ export const TOOLS: ToolDef[] = [
         throw new Error("types must be a non-empty array of: phone_no, email, work_email");
       }
       return await leadEnrich(apiBase, jwt, lead_id, types);
+    },
+  },
+  {
+    name: "bulk_enrich",
+    title: "Bulk-enrich searched leads (fast, one batch)",
+    description:
+      "Reveal phone/email for MANY searched leads in ONE call — the efficient path for 50–100+ leads. " +
+      "Pass a search_id and the lead_ids (both come from lead_search) plus the contact types. The server reveals them concurrently and bills them as a single batch (already-revealed rows are free). CHARGED: per-contact enrichment + a 0.5-credit/row export fee (min 2). " +
+      "Returns only COUNTS + a 3-row sample to keep the response small — the full contacts live behind the search's view_url. " +
+      "Use this instead of looping lead_enrich. Keep each call to " + String(BULK_ENRICH_MAX) + " leads or fewer (≈50 is snappiest); split larger selections into batches. Only request the types you need (prefer work_email for B2B).",
+    readOnlyHint: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        search_id: { type: "string", description: "The search_id from lead_search." },
+        lead_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Lead `id`s from lead_search (1–" + String(BULK_ENRICH_MAX) + "). NOT URLs. Duplicates are removed.",
+        },
+        types: {
+          type: "array",
+          items: { type: "string", enum: ["phone_no", "email", "work_email"] },
+          description: "Which contacts to reveal for every lead. Each type is charged per lead.",
+        },
+      },
+      required: ["search_id", "lead_ids", "types"],
+    },
+    async run(args, { jwt, apiBase }) {
+      const search_id = String(args.search_id ?? "").trim();
+      if (!search_id) throw new Error("search_id is required (from lead_search)");
+
+      const rawIds = Array.isArray(args.lead_ids) ? args.lead_ids : [];
+      const seenId = new Set<string>();
+      const lead_ids: string[] = [];
+      for (const v of rawIds) {
+        const id = String(v ?? "").trim();
+        if (!id) continue;
+        if (LINKEDIN_RE.test(id)) {
+          throw new Error("lead_ids must be lead `id`s from lead_search, not URLs.");
+        }
+        if (!seenId.has(id)) {
+          seenId.add(id);
+          lead_ids.push(id);
+        }
+      }
+      if (lead_ids.length === 0) throw new Error("lead_ids must be a non-empty array of lead ids");
+      if (lead_ids.length > BULK_ENRICH_MAX) {
+        throw new Error(
+          `Too many leads (${lead_ids.length}). Max ${BULK_ENRICH_MAX} per call — split into smaller batches.`,
+        );
+      }
+
+      const rawTypes = Array.isArray(args.types) ? args.types : [];
+      const seenType = new Set<string>();
+      const types: string[] = [];
+      for (const t of rawTypes) {
+        const type = String(t ?? "").trim();
+        if (type && type in BULK_TYPES && !seenType.has(type)) {
+          seenType.add(type);
+          types.push(type);
+        }
+      }
+      if (types.length === 0) {
+        throw new Error("types must be a non-empty array of: phone_no, email, work_email");
+      }
+
+      const r = await bulkEnrich(apiBase, jwt, search_id, lead_ids, types);
+
+      // Compress: counts + a tiny sample, never the full row set.
+      const leads = r.leads ?? [];
+      const hasVal = (v: unknown) =>
+        Array.isArray(v) ? v.length > 0 : v != null && String(v).trim() !== "";
+      const found: Record<string, number> = {};
+      for (const t of types) found[t] = leads.filter((l) => hasVal(l[t])).length;
+      const sample = leads.slice(0, 3).map((l) => ({
+        name: l.name,
+        company: l.company,
+        ...(types.includes("phone_no") ? { phone_no: l.phone_no } : {}),
+        ...(types.includes("email") ? { email: l.email } : {}),
+        ...(types.includes("work_email") ? { work_email: l.work_email } : {}),
+      }));
+
+      return {
+        message:
+          `Enriched ${r.enriched_count}/${lead_ids.length} leads. ` +
+          `Charged ${r.credits_charged} credits (${r.charged_rows} new rows)` +
+          (r.credits_remaining != null ? `, ${r.credits_remaining} remaining.` : "."),
+        requested: lead_ids.length,
+        enriched_count: r.enriched_count,
+        charged_rows: r.charged_rows,
+        credits_charged: r.credits_charged,
+        credits_remaining: r.credits_remaining,
+        found,
+        sample,
+        note:
+          "Only counts + a 3-row sample are returned to keep this fast and cheap on tokens. " +
+          "All revealed contacts are saved on the search — open its view_url to get the full set.",
+      };
     },
   },
   {
