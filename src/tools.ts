@@ -5,7 +5,7 @@ import {
   leadSearch,
   companySearch,
   leadEnrich,
-  bulkEnrich,
+  exportLeads,
   type ExtractorType,
   type LeadSearchFilters,
   type CompanySearchFilters,
@@ -91,10 +91,12 @@ const BULK_TYPES: Record<string, { field: string; label: string }> = {
 
 const BULK_MAX = 250;
 
-// Cap per bulk_enrich call. Enrichment waterfalls are slow (seconds each), so a
-// batch this size keeps one call comfortably inside the connector's timeout;
-// larger selections should be split into batches (~50 is snappiest).
-const BULK_ENRICH_MAX = 100;
+// Export caps. Pure export (packaging already-revealed rows) is fast, so we
+// allow big batches. Reveal-and-export runs the slow enrichment waterfall, so a
+// call that also reveals is capped much lower to stay inside the connector
+// timeout — reveal in batches, then export the whole set in one go.
+const EXPORT_MAX = 1000;
+const EXPORT_REVEAL_MAX = 100;
 
 // Beta: search tools return only a small sample to the agent — the human opens
 // view_url to confirm before we trust bulk output.
@@ -366,8 +368,8 @@ export const TOOLS: ToolDef[] = [
         sample,
         note:
           "Beta: only a ~5-row sample is shown — open view_url to confirm before trusting the full set. " +
-          "For MANY contacts, pass search_id + lead_ids (above) to bulk_enrich in ONE call — do NOT loop lead_enrich. " +
-          "For a single lead, call lead_enrich(lead_id, types). " +
+          "Spot-check one lead with lead_enrich(lead_id, types). " +
+          "To take MANY out, confirm with the user first, then call export_leads(search_id, lead_ids, [types]) — search stays free; export is the billable step. " +
           (r.total > r.count ? "More results exist — reuse this search_id with page+1." : ""),
       };
     },
@@ -468,13 +470,16 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: "bulk_enrich",
-    title: "Bulk-enrich searched leads (fast, one batch)",
+    name: "export_leads",
+    title: "Export searched leads (deliberate, billable)",
     description:
-      "Reveal phone/email for MANY searched leads in ONE call — the efficient path for 50–100+ leads. " +
-      "Pass a search_id and the lead_ids (both come from lead_search) plus the contact types. The server reveals them concurrently and bills them as a single batch (already-revealed rows are free). CHARGED: per-contact enrichment + a 0.5-credit/row export fee (min 2). " +
-      "Returns only COUNTS + a 3-row sample to keep the response small — the full contacts live behind the search's view_url. " +
-      "Use this instead of looping lead_enrich. Keep each call to " + String(BULK_ENRICH_MAX) + " leads or fewer (≈50 is snappiest); split larger selections into batches. Only request the types you need (prefer work_email for B2B).",
+      "Take MANY searched leads OUT in one call. This is the EXPORT step — deliberate and BILLABLE — kept separate from the free search on purpose (unlike tools that meter search and export together). " +
+      "ONLY call this after the user has explicitly confirmed they want to export, and tell them the count and cost first: export is 0.5 credit/row (min 2) on rows not exported before; re-exporting an already-exported row is free. " +
+      "TWO MODES via `types`: " +
+      "(a) omit `types` → fast pure export of contacts already revealed — use this to take up to " + String(EXPORT_MAX) + " out at once. " +
+      "(b) include `types` → also reveal those contacts for any unrevealed rows (each type charged per lead); keep these calls to " + String(EXPORT_REVEAL_MAX) + " leads or fewer since revealing is slower. " +
+      "To export a large set with fresh contacts: reveal in batches of ~" + String(EXPORT_REVEAL_MAX) + " (types set), then do one final export with types omitted to pull everything together. " +
+      "Returns COUNTS + a 3-row sample only; the full contacts live behind the search's view_url.",
     readOnlyHint: false,
     inputSchema: {
       type: "object",
@@ -483,15 +488,15 @@ export const TOOLS: ToolDef[] = [
         lead_ids: {
           type: "array",
           items: { type: "string" },
-          description: "Lead `id`s from lead_search (1–" + String(BULK_ENRICH_MAX) + "). NOT URLs. Duplicates are removed.",
+          description: "Lead `id`s from lead_search to export (1–" + String(EXPORT_MAX) + "). NOT URLs. Duplicates are removed.",
         },
         types: {
           type: "array",
           items: { type: "string", enum: ["phone_no", "email", "work_email"] },
-          description: "Which contacts to reveal for every lead. Each type is charged per lead.",
+          description: "OPTIONAL. Contacts to reveal for unrevealed rows before exporting. Omit to export only already-revealed contacts (fast, large batches). Each type is charged per newly-revealed lead.",
         },
       },
-      required: ["search_id", "lead_ids", "types"],
+      required: ["search_id", "lead_ids"],
     },
     async run(args, { jwt, apiBase }) {
       const search_id = String(args.search_id ?? "").trim();
@@ -512,11 +517,6 @@ export const TOOLS: ToolDef[] = [
         }
       }
       if (lead_ids.length === 0) throw new Error("lead_ids must be a non-empty array of lead ids");
-      if (lead_ids.length > BULK_ENRICH_MAX) {
-        throw new Error(
-          `Too many leads (${lead_ids.length}). Max ${BULK_ENRICH_MAX} per call — split into smaller batches.`,
-        );
-      }
 
       const rawTypes = Array.isArray(args.types) ? args.types : [];
       const seenType = new Set<string>();
@@ -528,32 +528,44 @@ export const TOOLS: ToolDef[] = [
           types.push(type);
         }
       }
-      if (types.length === 0) {
-        throw new Error("types must be a non-empty array of: phone_no, email, work_email");
+      const revealing = types.length > 0;
+
+      // Reveal-and-export is slow per row → tighter cap; pure export is fast.
+      const cap = revealing ? EXPORT_REVEAL_MAX : EXPORT_MAX;
+      if (lead_ids.length > cap) {
+        throw new Error(
+          revealing
+            ? `Too many leads to reveal in one call (${lead_ids.length}). Max ${cap} when types are set — reveal in batches of ~${cap}, then export the full set with types omitted.`
+            : `Too many leads (${lead_ids.length}). Max ${cap} per export call.`,
+        );
       }
 
-      const r = await bulkEnrich(apiBase, jwt, search_id, lead_ids, types);
+      const r = await exportLeads(apiBase, jwt, search_id, lead_ids, revealing ? types : undefined);
 
       // Compress: counts + a tiny sample, never the full row set.
       const leads = r.leads ?? [];
       const hasVal = (v: unknown) =>
         Array.isArray(v) ? v.length > 0 : v != null && String(v).trim() !== "";
+      const countTypes = revealing ? types : ["phone_no", "email", "work_email"];
       const found: Record<string, number> = {};
-      for (const t of types) found[t] = leads.filter((l) => hasVal(l[t])).length;
+      for (const t of countTypes) found[t] = leads.filter((l) => hasVal(l[t])).length;
       const sample = leads.slice(0, 3).map((l) => ({
         name: l.name,
         company: l.company,
-        ...(types.includes("phone_no") ? { phone_no: l.phone_no } : {}),
-        ...(types.includes("email") ? { email: l.email } : {}),
-        ...(types.includes("work_email") ? { work_email: l.work_email } : {}),
+        phone_no: l.phone_no,
+        email: l.email,
+        work_email: l.work_email,
       }));
 
       return {
         message:
-          `Enriched ${r.enriched_count}/${lead_ids.length} leads. ` +
-          `Charged ${r.credits_charged} credits (${r.charged_rows} new rows)` +
+          `Exported ${leads.length}/${lead_ids.length} leads` +
+          (revealing ? ` (revealed ${r.enriched_count})` : "") +
+          `. Charged ${r.credits_charged} credits (${r.charged_rows} billed rows)` +
           (r.credits_remaining != null ? `, ${r.credits_remaining} remaining.` : "."),
+        mode: revealing ? "reveal_and_export" : "export_only",
         requested: lead_ids.length,
+        exported: leads.length,
         enriched_count: r.enriched_count,
         charged_rows: r.charged_rows,
         credits_charged: r.credits_charged,
@@ -561,8 +573,8 @@ export const TOOLS: ToolDef[] = [
         found,
         sample,
         note:
-          "Only counts + a 3-row sample are returned to keep this fast and cheap on tokens. " +
-          "All revealed contacts are saved on the search — open its view_url to get the full set.",
+          "Only counts + a 3-row sample are returned to keep this cheap on tokens. " +
+          "All exported contacts are saved on the search — open its view_url to download the full set.",
       };
     },
   },

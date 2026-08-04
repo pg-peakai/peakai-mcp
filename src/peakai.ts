@@ -209,7 +209,7 @@ export async function leadEnrich(
   return (await postJson(apiBase, "/mcp/search-enrich", jwt, { lead_id, types })) as LeadEnrichResult;
 }
 
-export interface BulkEnrichResult {
+export interface ExportLeadsResult {
   enriched_count: number;
   credits_charged: number;
   credits_remaining: number | null;
@@ -218,24 +218,26 @@ export interface BulkEnrichResult {
 }
 
 /**
- * POST /mcp/lead-export — bulk reveal-and-export MANY searched leads in ONE
- * call. The backend resolves + enriches the not-yet-revealed rows concurrently
- * (8 at a time) and bills them as a single batch; already-revealed rows are
- * free. This is the efficient path for 50–100+ leads — far fewer round-trips
- * and tokens than looping leadEnrich per lead.
+ * POST /mcp/lead-export — the deliberate EXPORT step: take MANY searched leads
+ * out in ONE call. Two modes, set by `types`:
+ *  - types omitted → pure export of already-revealed contacts (fast; the heavy
+ *    enrichment already happened). Good for taking ~1000 out at once.
+ *  - types provided → reveal-and-export: unrevealed rows are enriched
+ *    concurrently (8 at a time) and billed as one batch; already-revealed rows
+ *    are free. Slower per row, so keep these batches smaller.
+ * Export is charged (0.5 credit/row, min 2) on rows not previously exported;
+ * re-downloading an already-exported row is free.
  */
-export async function bulkEnrich(
+export async function exportLeads(
   apiBase: string,
   jwt: string,
   searchId: string,
   leadIds: string[],
-  types: string[],
-): Promise<BulkEnrichResult> {
-  return (await postJson(apiBase, "/mcp/lead-export", jwt, {
-    search_id: searchId,
-    lead_ids: leadIds,
-    enrich_types: types,
-  })) as BulkEnrichResult;
+  types?: string[],
+): Promise<ExportLeadsResult> {
+  const body: Record<string, unknown> = { search_id: searchId, lead_ids: leadIds };
+  if (types && types.length > 0) body.enrich_types = types;
+  return (await postJson(apiBase, "/mcp/lead-export", jwt, body)) as ExportLeadsResult;
 }
 
 export async function exchangePassword(
